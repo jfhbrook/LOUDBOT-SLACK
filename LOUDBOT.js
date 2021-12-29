@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 
 const
-	DEMAND       = require,
-	BORING_EMOJI = DEMAND('emoji-list'),
-	FLIP         = DEMAND('flip'),
-	FS           = DEMAND('fs'),
-	LRU          = DEMAND('lru-cache'),
-	MARKOV       = DEMAND('markov-chains-text').default,
-	SHUFFLE      = DEMAND('knuth-shuffle').knuthShuffle,
-	SLACK        = DEMAND('@slack/client'),
-	SLACK_EVENTS = SLACK.CLIENT_EVENTS.RTM,
-	RTM_EVENTS   = SLACK.RTM_EVENTS,
-	LOG          = console.log
+	DEMAND        = require,
+	BORING_EMOJI  = DEMAND('emoji-list'),
+	FLIP          = DEMAND('flip'),
+	FS            = DEMAND('fs'),
+	LRU           = DEMAND('lru-cache'),
+	MARKOV        = DEMAND('markov-chains-text').default,
+	SHUFFLE       = DEMAND('knuth-shuffle').knuthShuffle,
+	SLACK         = DEMAND('@slack/client'),
+	SLACK_EVENTS  = SLACK.CLIENT_EVENTS.RTM,
+	RTM_EVENTS    = SLACK.RTM_EVENTS,
+	GAMER_SLACK   = DEMAND('discord.js'),
+	GAMER_INTENTS = GAMER_SLACK.Intents.FLAGS,
+	GAMER_PERMS   = GAMER_SLACK.Permissions.FLAGS,
+	LOG           = console.log
 	;
 
 function ISLOUD(MSG)
@@ -27,8 +30,8 @@ function ROLL_D100(CHANCE)
 var SAVEFILE = __dirname + '/LOUDS';
 var SAVING = false;
 var WAITING = [];
-var EMOJI = [];
-var EMOJI_PATTERNS = [];
+var EMOJI = {};
+var EMOJI_PATTERNS = {};
 
 var LOUDBOT = module.exports = function LOUDBOT()
 {
@@ -42,31 +45,103 @@ var LOUDBOT = module.exports = function LOUDBOT()
 
 	THIS.CACHE = LRU({ max: 2000, });
 
-	THIS.WEB = new SLACK.WebClient(process.env.SLACK_API_TOKEN);
-	THIS.LOAD_EMOJI();
-	THIS.RTM = new SLACK.RtmClient(process.env.SLACK_API_TOKEN, {logLevel: 'warn'});
-	THIS.RTM.on(RTM_EVENTS.MESSAGE, function(DATA) { THIS.LISTENUP(DATA); });
-	THIS.RTM.on('error', function(INFRACTION) { LOG(INFRACTION); });
+	if (process.env.SLACK_API_TOKEN)
+	{
+		THIS.WEB = new SLACK.WebClient(process.env.SLACK_API_TOKEN);
+		THIS.LOAD_EMOJI();
+		THIS.RTM = new SLACK.RtmClient(process.env.SLACK_API_TOKEN, {logLevel: 'warn'});
+		THIS.RTM.on(RTM_EVENTS.MESSAGE, function(DATA) { THIS.LISTENUP(DATA); });
+		THIS.RTM.on('error', function(INFRACTION) { LOG(INFRACTION); });
+	}
+
+	if (process.env.DISCORD_API_TOKEN)
+	{
+		THIS.GAMER_SLACK = new GAMER_SLACK.Client({
+			permissions: [
+				GAMER_PERMS.CHANGE_NICKNAME,
+				GAMER_PERMS.SEND_MESSAGES,
+				GAMER_PERMS.ADD_REACTIONS,
+				GAMER_PERMS.VIEW_CHANNEL,
+				GAMER_PERMS.SEND_MESSAGES_IN_THREADS
+			],
+			intents: [
+				GAMER_INTENTS.GUILDS,
+				GAMER_INTENTS.GUILD_MESSAGES,
+				GAMER_INTENTS.GUILD_MESSAGE_REACTIONS
+			]
+		});
+		THIS.LOAD_EMOJI();
+		THIS.GAMER_SLACK.on('messageCreate', function(MESSAGE) {
+			THIS.LISTENUP({
+				ts: MESSAGE.id,
+				text: MESSAGE.content,
+				user: MESSAGE.author.id,
+				subtype: MESSAGE.author.bot ? 'bot_message' : '',
+				channel: `${MESSAGE.guild.name}/#${MESSAGE.channel.name}`,
+				SERVER: MESSAGE.guild.id || 'DEFAULT',
+				DISCORD_MESSAGE: MESSAGE
+			});
+		});
+		THIS.GAMER_SLACK.on('error', function(INFRACTION) { LOG(INFRACTION); });
+	}
 };
+
+LOUDBOT.prototype.LOAD_BORING_EMOJI = function LOAD_BORING_EMOJI(SERVER)
+{
+	EMOJI[SERVER] = EMOJI[SERVER] || [];
+	for (let I = 0; I < BORING_EMOJI.length; I++)
+		EMOJI[SERVER].push(BORING_EMOJI[I].replace(/:(\w+):/g, '$1'));
+}
+
+LOUDBOT.prototype.LOAD_EMOJI_PATTERNS = function LOAD_EMOJI_PATTERNS(SERVER)
+{
+	EMOJI[SERVER] = EMOJI[SERVER] || [];
+  EMOJI_PATTERNS[SERVER] = EMOJI_PATTERNS[SERVER] || [];
+	// LOUDBOT LIKES EMOJI AND ALSO OLD-SCHOOL FOR LOOPS
+	for (let I = 0; I < EMOJI[SERVER].length; I++)
+		EMOJI_PATTERNS[SERVER].push(new RegExp('(^|\W)' + EMOJI[SERVER][I] + '(\W|$)'));
+}
 
 LOUDBOT.prototype.LOAD_EMOJI = function LOAD_EMOJI()
 {
 	const THIS = this;
+	let COUNT = BORING_EMOJI.length;
 
-	for (var I = 0; I < BORING_EMOJI.length; I++)
-		EMOJI.push(BORING_EMOJI[I].replace(/:(\w+):/g, '$1'));
+	THIS.LOAD_BORING_EMOJI('DEFAULT');
+	THIS.LOAD_EMOJI_PATTERNS('DEFAULT');
 
-	THIS.WEB.emoji.list(function(INFRACTION, INCONVENIENT_RESPONSE)
+	if (THIS.WEB)
 	{
-		if (INFRACTION) return LOG(JSON.stringify(INFRACTION));
-		EMOJI = EMOJI.concat(Object.keys(INCONVENIENT_RESPONSE.emoji)).sort();
-		// LOUDBOT LIKES EMOJI AND ALSO OLD-SCHOOL FOR LOOPS
-		for (I = 0; I < EMOJI.length; I++)
-			EMOJI_PATTERNS.push(new RegExp('(^|\W)' + EMOJI[I] + '(\W|$)'));
+		THIS.LOAD_BORING_EMOJI('SLACK');
 
-		LOG(`WHOA I KNOW ${EMOJI.length} EMOJI`);
-	});
+		THIS.WEB.emoji.list(function(INFRACTION, INCONVENIENT_RESPONSE)
+		{
+			if (INFRACTION) return LOG(JSON.stringify(INFRACTION));
+			EMOJI['SLACK'] = (EMOJI['SLACK'] || []).concat(Object.keys(INCONVENIENT_RESPONSE.emoji)).sort();
+			COUNT += Object.keys(INCONVENIENT_RESPONSE.emoji).length;
+			THIS.LOAD_EMOJI_PATTERNS('SLACK');
+		});
+	}
+
+	if (THIS.GAMER_SLACK)
+	{
+		THIS.GAMER_SLACK.on('ready', function LOAD_GAMER_EMOJI() {
+			for (const [SERVER, INCONVENIENT_COLLECTION] of THIS.GAMER_SLACK.guilds.cache)
+			{
+				THIS.LOAD_BORING_EMOJI(SERVER);
+				for (const [_, INCONVENIENT_MODEL] of INCONVENIENT_COLLECTION.emojis.cache)
+				{
+					EMOJI[SERVER] = (EMOJI[SERVER] || []).concat(INCONVENIENT_MODEL.identifier).sort();
+					COUNT += 1;
+				}
+				THIS.LOAD_EMOJI_PATTERNS(SERVER);
+			}
+		});
+	}
+
+	LOG(`WHOA I KNOW ${COUNT} EMOJI`);
 };
+
 
 LOUDBOT.prototype.LOAD_ALL_LOUDS = function LOAD_ALL_LOUDS()
 {
@@ -91,12 +166,30 @@ LOUDBOT.prototype.ADD_LINES = function ADD_LINES(FILENAME)
 LOUDBOT.prototype.GOGOGO = function GOGOGO()
 {
 	const THIS = this;
+	let COUNT = 0;
 
-	THIS.RTM.start();
-	THIS.RTM.on(SLACK_EVENTS.RTM_CONNECTION_OPENED, function slackClientOpened()
+	function JACKING_IN()
 	{
-		LOG('THIS LOUDBOT IS NOW FULLY ARMED AND OPERATIONAL');
-	});
+		COUNT--;
+		if (!COUNT)
+			LOG('THIS LOUDBOT IS NOW FULLY ARMED AND OPERATIONAL');
+	}
+
+	if (THIS.RTM)
+	{
+		COUNT++;
+		LOG('LOUDBOT IS LOGGING ONTO SLACK');
+		THIS.RTM.start();
+		THIS.RTM.on(SLACK_EVENTS.RTM_CONNECTION_OPENED, JACKING_IN);
+	}
+
+	if (THIS.GAMER_SLACK)
+	{
+		COUNT++;
+		LOG('LOUDBOT IS LOGGING ONTO DISCORD');
+		THIS.GAMER_SLACK.login(process.env.DISCORD_API_TOKEN);
+		THIS.GAMER_SLACK.on('ready', JACKING_IN);
+	}
 };
 
 const RECENT = 1000 * 60 * 5;
@@ -104,6 +197,7 @@ const RECENT = 1000 * 60 * 5;
 LOUDBOT.prototype.LISTENUP = function LISTENUP(DATA)
 {
 	const THIS = this;
+
 	if (!DATA.text || DATA.user === 'U07FD4NH1' || DATA.subtype === 'bot_message') return;
 	if (THIS.CACHE.get(DATA.ts)) { LOG('SKIPPING SEEN MESSAGE'); return; }
 	if (DATA.ts * 1000 < Date.now() - RECENT) { return; }
@@ -244,16 +338,24 @@ LOUDBOT.prototype.TAKE_OFF_ZIG = function TAKE_OFF_ZIG(DATA)
 	}
 };
 
-LOUDBOT.prototype.CHOOSE_EMOJI = function CHOOSE_EMOJI(MSG)
+LOUDBOT.prototype.CHOOSE_EMOJI = function CHOOSE_EMOJI(MSG, SERVER)
 {
-	for (var I = 0; I < EMOJI_PATTERNS.length; I++)
+	const THIS = this;
+
+	if (!EMOJI[SERVER])
 	{
-		if (MSG.match(EMOJI_PATTERNS[I]) && ROLL_D100(20))
-			return EMOJI[I];
+		THIS.LOAD_BORING_EMOJI(SERVER);
+		THIS.LOAD_EMOJI_PATTERNS(SERVER);
+	}
+
+	for (var I = 0; I < EMOJI_PATTERNS[SERVER].length; I++)
+	{
+		if (MSG.match(EMOJI_PATTERNS[SERVER][I]) && ROLL_D100(20))
+			return EMOJI[SERVER][I];
 	}
 
 	if (MSG.match(/(\?|!)/) && ROLL_D100(2))
-		return EMOJI[Math.floor(Math.random() * EMOJI.length)];
+		return EMOJI[SERVER][Math.floor(Math.random() * EMOJI.length)];
 };
 
 LOUDBOT.prototype.DOEMOJI = function DOEMOJI(DATA)
@@ -261,22 +363,29 @@ LOUDBOT.prototype.DOEMOJI = function DOEMOJI(DATA)
 	// SOMETIMES LOUDBOT USES EMOJI
 	const THIS = this;
 
-	var EMO = THIS.CHOOSE_EMOJI(DATA.text);
+	var EMO = THIS.CHOOSE_EMOJI(DATA.text, DATA.SERVER);
 	if (!EMO)
 		return;
 
-	var OPTS = {
-		channel: DATA.channel,
-		timestamp: DATA.ts
-	};
-	THIS.WEB.reactions.add(EMO, OPTS, function(ERROR, RESPONSE)
+	if (DATA.SERVER === 'SLACK')
 	{
-		if (ERROR)
+		var OPTS = {
+			channel: DATA.channel,
+			timestamp: DATA.ts
+		};
+		THIS.WEB.reactions.add(EMO, OPTS, function(ERROR, RESPONSE)
 		{
-			LOG(JSON.stringify(ERROR));
-			LOG(RESPONSE);
-		}
-	});
+			if (ERROR)
+			{
+				LOG(JSON.stringify(ERROR));
+				LOG(RESPONSE);
+			}
+		});
+	}
+	else
+	{
+		DATA.DISCORD_MESSAGE.react(EMOJI);
+	}
 };
 
 LOUDBOT.prototype.HANDLE_SPECIALS = function HANDLE_SPECIALS(DATA)
@@ -364,8 +473,17 @@ LOUDBOT.prototype.YELL = function YELL(DATA, LOUD)
 {
 	const THIS = this;
 	LOG(`YELLING "${LOUD}" to ${DATA.channel} BECAUSE: ${DATA.text}`);
-	THIS.RTM.sendMessage(LOUD, DATA.channel);
-	THIS.COUNT++;
+
+	if (DATA.SERVER === 'SLACK')
+	{
+		THIS.RTM.sendMessage(LOUD, DATA.channel);
+		THIS.COUNT++;
+		return
+	}
+	else
+	{
+		DATA.DISCORD_MESSAGE.channel.send('' + LOUD);
+	}
 };
 
 LOUDBOT.prototype.REPORT = function REPORT(DATA)
@@ -376,7 +494,8 @@ LOUDBOT.prototype.REPORT = function REPORT(DATA)
 	const THIS = this;
 	var LOUD = 'I HAVE YELLED ' + (THIS.COUNT === 1 ? 'ONCE.' : `${THIS.COUNT} TIMES.`);
 	LOUD += ` I HAVE ${THIS.LOUDS.length} UNIQUE THINGS TO SAY.`;
-	THIS.RTM.sendMessage(LOUD, DATA.channel);
+
+	THIS.YELL(DATA, LOUD);
 	return true;
 };
 
@@ -384,8 +503,19 @@ if (require.main === module)
 {
 	require('dotenv').config({silent: true});
 	var ASSERT = require('assert');
-	ASSERT(process.env.SLACK_API_TOKEN, 'YOU MUST PROVIDE A SLACK API TOKEN IN THE ENVIRONMENT VARIABLE SLACK_API_TOKEN.');
+	ASSERT(
+    process.env.SLACK_API_TOKEN || process.env.DISCORD_API_TOKEN,
+    [
+      'YOU MUST PROVIDE EITHER A SLACK API TOKEN OR A DISCORD API TOKEN IN ',
+      'THE ENVIRONMENT VARIABLE SLACK_API_TOKEN.'
+    ]
+  );
 
 	var LOUDIE = new LOUDBOT();
 	LOUDIE.GOGOGO();
 }
+
+
+
+
+
